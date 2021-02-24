@@ -507,6 +507,7 @@ class simulator_func_mysql:
             return False
         return row[0][0]
 
+#####!@########################################
     # 실시간 주가 분석 알고리즘 함수 (느낌표 골뱅이 추가하면 검색 시 편합니다) (고급클래스에서 소개)
     def trade_check(self, df_row, open_price, current_price, current_sum_volume):
         '''
@@ -1108,7 +1109,7 @@ class simulator_func_mysql:
 
     # 매도를 하기 위한 함수
     def auto_trade_sell_stock(self, date, _i):
-        # 매도 할 리스트를 가져오는 함수
+        # 매도 할 리스트를 가져오는 함수(중요)
         sell_list = self.get_sell_list(_i)
         for i in range(len(sell_list)):
             # 코드명
@@ -1444,7 +1445,7 @@ class simulator_func_mysql:
             print("min_craw db의 종목 테이블에 " + str(
                 date_rows_today) + " 데이터가 존재 하지 않는다! self.simul_start_date 날짜를 변경 하세요! (분별 데이터는 콜렉터에서 최근 1년 데이터만 가져옵니다! ")
 
-    # 새로운 종목 매수 및 보유한 종목의 데이터를 업데이트 하는 함수, 매도 함수도 포함
+    # 새로운 종목 매수  및 보유한 종목의 데이터를 업데이트 하는 함수, 매도 함수도 포함
     def trading_by_date(self, date_rows_today, date_rows_yesterday, i):
         self.print_info(date_rows_today)
 
