@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import *
 logger.debug("trader start !!!!!!")
 
 
-class Trader(QMainWindow):
+class Trader(QMainWindow):      
     def __init__(self):
         logger.debug("Trader __init__!!!")
         super().__init__()
