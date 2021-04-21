@@ -1,8 +1,8 @@
 from collections import OrderedDict
 
-from sqlalchemy import Integer, Text
+from sqlalchemy import Integer, Text, String
 
-ver = "#version 1.3.14"
+ver = "#version 1.4.2"
 print(f"collector_api Version: {ver}")
 
 import numpy
@@ -44,22 +44,20 @@ class collector_api():
         # kospi(stock_kospi), kosdaq(stock_kosdaq), konex(stock_konex)
         # 관리종목(stock_managing), 불성실법인종목(stock_insincerity) 업데이트
         if rows[0][0] != self.open_api.today:
-            self.open_api.check_balance()
-            self.get_code_list()
+            self.get_code_list()  # 촬영 후 일부 업데이트 되었습니다.
 
-        # 잔고 및 보유종목 현황 db setting   &  # sql % setting
+        # 촬영 후 콜렉팅 순서가 일부 업데이트 되었습니다.
+        # 잔고 및 보유종목 현황 db setting  & 당일 종목별 실현 손익
         if rows[0][1] != self.open_api.today or rows[0][2] != self.open_api.today:
-            self.py_check_balance()
             self.open_api.set_invest_unit()
+            self.db_to_today_profit_list()
+            self.py_check_balance()
+            self.db_to_jango()
 
         # possessed_item(현재 보유종목) 테이블 업데이트
         if rows[0][2] != self.open_api.today:
             self.open_api.db_to_possesed_item()
             self.open_api.setting_data_possesed_item()
-
-        # 당일 종목별 실현 손익 db
-        if rows[0][3] != self.open_api.today:
-            self.db_to_today_profit_list()
 
         # daily_craw db 업데이트
         if rows[0][7] != self.open_api.today:
@@ -305,6 +303,7 @@ class collector_api():
 
     # 틱(1분 별) 데이터를 가져오는 함수
     def set_min_crawler_table(self, code, code_name):
+        is_new = True
         df = self.open_api.get_total_data_min(code, code_name, self.open_api.today)
         if len(df) == 0:
             return 1
@@ -376,6 +375,7 @@ class collector_api():
 
         if self.open_api.craw_table_exist:
             df_temp = df_temp[df_temp.date > self.open_api.craw_db_last_min]
+            is_new = False
 
         if len(df_temp) == 0:
             logger.debug("이미 min_craw db의 " + code_name + " 테이블에 콜렉팅 완료 했다! df_temp가 비었다!!")
@@ -416,6 +416,16 @@ class collector_api():
                 logger.critical(e)
 
         df_temp.to_sql(name=code_name, con=self.open_api.engine_craw, if_exists='append')
+        if is_new:
+            index_name = ''.join(c for c in code_name if c.isalnum())
+            try:
+                self.open_api.engine_craw.execute(f"""
+                    CREATE INDEX ix_{index_name}_date
+                    ON min_craw.`{code_name}` (date(12)) 
+                """)
+            except Exception:
+                pass
+
         # 콜렉팅하다가 max_api_call 횟수까지 가게 된 경우는 다시 콜렉팅 못한 정보를 가져와야 하니까 check_item_gubun=0
         if self.open_api.rq_count == cf.max_api_call - 1:
             check_item_gubun = 0
@@ -429,17 +439,18 @@ class collector_api():
             return 1
         oldest_row = df.iloc[-1]
         check_row = None
-
+        deleted = False
         check_daily_crawler_sql = """
-            UPDATE  daily_buy_list.stock_item_all SET check_daily_crawler = '4' WHERE code = '{}'
+            UPDATE daily_buy_list.stock_item_all SET check_daily_crawler = '4' WHERE code = '{}'
         """
 
-        if self.engine_JB.dialect.has_table(self.open_api.engine_daily_craw, code_name):
+        if self.open_api.engine_daily_craw.dialect.has_table(self.open_api.engine_daily_craw, code_name):
             check_row = self.open_api.engine_daily_craw.execute(f"""
                 SELECT * FROM `{code_name}` WHERE date = '{oldest_row['date']}' LIMIT 1
             """).fetchall()
         else:
             self.engine_JB.execute(check_daily_crawler_sql.format(code))
+            deleted = True
 
         if check_row and check_row[0]['close'] != oldest_row['close']:
             logger.info(f'{code} {code_name}의 액면분할/증자 등의 이유로 수정주가가 달라져서 처음부터 다시 콜렉팅')
@@ -455,6 +466,7 @@ class collector_api():
             logger.info('삭제 완료')
             df = self.open_api.get_total_data(code, code_name, self.open_api.today)
             self.engine_JB.execute(check_daily_crawler_sql.format(code))
+            deleted = True
 
         check_daily_crawler = self.engine_JB.execute(f"""
             SELECT check_daily_crawler FROM daily_buy_list.stock_item_all WHERE code = '{code}'
@@ -527,7 +539,7 @@ class collector_api():
         df_temp['vol120'] = df_temp['volume'].rolling(window=120).mean()
 
         # 여기 이렇게 추가해야함
-        if self.engine_JB.dialect.has_table(self.open_api.engine_daily_craw, code_name):
+        if self.open_api.engine_daily_craw.dialect.has_table(self.open_api.engine_daily_craw, code_name):
             df_temp = df_temp[df_temp.date > self.open_api.get_daily_craw_db_last_date(code_name)]
 
         if len(df_temp) == 0 and check_daily_crawler != '4':
@@ -550,7 +562,19 @@ class collector_api():
                  'yes_clo120',
                  'vol5', 'vol10', 'vol20', 'vol40', 'vol60', 'vol80', 'vol100', 'vol120']].fillna(0).astype(int)
 
+        # inf 를 NaN으로 변경 (inf can not be used with MySQL 에러 방지)
+        df_temp = df_temp.replace([numpy.inf, -numpy.inf], numpy.nan)
+
         df_temp.to_sql(name=code_name, con=self.open_api.engine_daily_craw, if_exists='append')
+        index_name = ''.join(c for c in code_name if c.isalnum())
+        if deleted:
+            try:
+                self.open_api.engine_daily_craw.execute(f"""
+                    CREATE INDEX ix_{index_name}_date
+                    ON daily_craw.`{code_name}` (date(8)) 
+                """)
+            except Exception:
+                pass
 
         # check_daily_crawler 가 4 인 경우는 액면분할, 증자 등으로 인해 daily_buy_list 업데이트를 해야하는 경우
         if check_daily_crawler == '4':
@@ -564,13 +588,21 @@ class collector_api():
             for row in dbl_dates:
                 logger.info(f'{code} {code_name} - daily_buy_list.`{row.tname}` 업데이트')
                 try:
-                    new_data = df_temp[df_temp['date'] == row.tname]
-                except IndexError:
+                    new_data = df_temp.loc[row.tname]
+                except KeyError:
                     continue
                 self.open_api.engine_daily_buy_list.execute(f"""
                     DELETE FROM `{row.tname}` WHERE code = {code}
                 """)
-                new_data.to_sql(name=row.tname, con=self.open_api.engine_daily_buy_list, if_exists='append')
+                if not new_data.empty:
+                    new_data.set_index('code')
+                    new_data.to_sql(
+                        name=row.tname,
+                        con=self.open_api.engine_daily_buy_list,
+                        index=True,
+                        if_exists='append',
+                        dtype={'code': String(6)}
+                    )
 
             logger.info('daily_buy_list 업데이트 완료')
 
@@ -920,54 +952,25 @@ class collector_api():
         self.engine_JB.execute(sql % (self.open_api.today))
         # self.open_api.jackbot_db_con.commit()
 
+    # 일자별 실현손익
     def py_check_balance(self):
         logger.debug("py_check_balance!!!")
-        # 1차원 정보 저장
-        # 1차원 / 2차원 인스턴스 변수 생성
-        self.open_api.reset_opw00018_output()
-
-        self.open_api.set_input_value("계좌번호", self.open_api.account_number)
-        self.open_api.set_input_value("비밀번호입력매체구분", 00);
-        # 조회구분 = 1:추정조회, 2: 일반조회
-        self.open_api.set_input_value("조회구분", 1);
-
-        self.open_api.comm_rq_data("opw00001_req", "opw00001", 0, "2000")
-
-        self.open_api.set_input_value("계좌번호", self.open_api.account_number)
-
-        self.open_api.comm_rq_data("opw00018_req", "opw00018", 0, "2000")
-
-        while self.open_api.remained_data:
-            self.open_api.set_input_value("계좌번호", self.open_api.account_number)
-
-            self.open_api.comm_rq_data("opw00018_req", "opw00018", 2, "2000")
-
         # 일자별 실현손익 출력
         self.open_api.set_input_value("계좌번호", self.open_api.account_number)
         # 	시작일자 = YYYYMMDD (20170101 연도4자리, 월 2자리, 일 2자리 형식)
         self.open_api.set_input_value("시작일자", "20170101")
-        #
         # 	종료일자 = YYYYMMDD (20170101 연도4자리, 월 2자리, 일 2자리 형식)
         self.open_api.set_input_value("종료일자", self.open_api.today)
-        # opt opw 구분해라!!!!
-
         self.open_api.comm_rq_data("opt10074_req", "opt10074", 0, "0329")
         while self.open_api.remained_data:
             # # comm_rq_data 호출하기 전에 반드시 set_input_value 해야한다. 초기화 되기 때문
             self.open_api.set_input_value("계좌번호", self.open_api.account_number)
-
             # 	시작일자 = YYYYMMDD (20170101 연도4자리, 월 2자리, 일 2자리 형식)
             self.open_api.set_input_value("시작일자", "20170101")
-            #
             # 	종료일자 = YYYYMMDD (20170101 연도4자리, 월 2자리, 일 2자리 형식)
-            self.open_api.set_input_value("종료일자", "20180930")
-
-            # 	구분 = 0:전체, 1:입출금, 2:입출고, 3:매매, 4:매수, 5:매도, 6:입금, 7:출금, A:예탁담보대출입금, F:환전
-            self.open_api.set_input_value("구분", "0")
+            self.open_api.set_input_value("종료일자", self.open_api.today)
             self.open_api.comm_rq_data("opt10074_req", "opt10074", 2, "0329")
 
-        # 거래내역
-        # # balance
-        self.db_to_jango()
+
 
 

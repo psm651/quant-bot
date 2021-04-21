@@ -1,4 +1,6 @@
-ver = "#version 1.3.10"
+from functools import partial
+
+ver = "#version 1.3.15"
 print(f"open_api Version: {ver}")
 
 from library.simulator_func_mysql import *
@@ -48,8 +50,15 @@ event.listen(Pool, 'connect', setup_sql_mod)
 event.listen(Pool, 'first_connect', setup_sql_mod)
 
 
-class RateLimitExceeded(BaseException):
+class RateLimitExceeded(Exception):
     pass
+
+
+def timedout_exit(widget):
+    logger.debug("서버로 부터 응답이 없어 프로그램을 종료합니다.")
+    widget.clear()
+    time.sleep(3)
+    sys.exit(-1)
 
 
 class open_api(QAxWidget):
@@ -314,7 +323,7 @@ class open_api(QAxWidget):
 
     def comm_rq_data(self, rqname, trcode, next, screen_no):
         self.exit_check()
-        ret = self.dynamicCall("CommRqData(QString, QString, int, QString", rqname, trcode, next, screen_no)
+        ret = self.dynamicCall("CommRqData(QString, QString, int, QString)", rqname, trcode, next, screen_no)
         if ret == -200:
             raise RateLimitExceeded('요청제한 횟수를 초과하였습니다.')
 
@@ -323,12 +332,18 @@ class open_api(QAxWidget):
         if ret == 0:
             self.tr_event_loop = QEventLoop()
             self.tr_loop_count += 1
+            # 영상 촬영 후 추가 된 코드입니다 (서버 응답이 늦을 시 예외 발생)
+            self.timer = QTimer()
+            self.timer.timeout.connect(partial(timedout_exit, self))
+            self.timer.setSingleShot(True)
+            self.timer.start(5000)
+            #########################################################
             self.tr_event_loop.exec_()
 
     def _get_comm_data(self, code, field_name, index, item_name):
         # logger.debug('calling GetCommData...')
         # self.exit_check()
-        ret = self.dynamicCall("GetCommData(QString, QString, int, QString", code, field_name, index, item_name)
+        ret = self.dynamicCall("GetCommData(QString, QString, int, QString)", code, field_name, index, item_name)
         return ret.strip()
 
     def _get_repeat_cnt(self, trcode, rqname):
@@ -629,7 +644,7 @@ class open_api(QAxWidget):
             self.set_input_value("수정주가구분", 1)
             self.comm_rq_data("opt10080_req", "opt10080", 2, "1999")
 
-            if self.ohlcv['date'][-1] < self.craw_db_last_min:
+            if not self.ohlcv or self.ohlcv['date'][-1] < self.craw_db_last_min:
                 break
 
         time.sleep(TR_REQ_TIME_INTERVAL)
@@ -757,9 +772,12 @@ class open_api(QAxWidget):
         # 데이터 프레임이 비어있으면 False를 반환한다.
         if df.empty:
             return False
-        logger.debug("get_one_day_option_data df : {} ".format(df))
-        logger.debug("code : {},type(code): {}, start: {}, option: {} ".format(code, type(code), start, option))
-        logger.debug("df.iloc[0, 3] (close) : {} ".format(df.iloc[0, 3]))
+        try:
+            logger.debug("get_one_day_option_data df : {} ".format(df))
+            logger.debug("code : {},type(code): {}, start: {}, option: {} ".format(code, type(code), start, option))
+            logger.debug("df.iloc[0, 3] (close) : {} ".format(df.iloc[0, 3]))
+        except Exception as e:
+            logger.critical(e)
 
         if option == 'open':
             return df.iloc[0, 0]
@@ -1331,6 +1349,14 @@ class open_api(QAxWidget):
     def _receive_chejan_data(self, gubun, item_cnt, fid_list):
         logger.debug("_receive_chejan_data 함수로 들어왔습니다!!!")
         logger.debug("gubun !!! :" + gubun)
+
+        account_num = self.get_chejan_data(9201)
+
+        # 선택 계좌가 아닐 시 아무 행동도 하지 않는다
+        if self.account_number != account_num:
+            logger.info(f"{self.account_number} != {account_num}")
+            return
+
         # 체결구분 접수와 체결
         if gubun == "0":
             logger.debug("in 체결 data!!!!!")
@@ -1368,7 +1394,7 @@ class open_api(QAxWidget):
             # logger.debug("체결량!!!")
             # logger.debug(self.get_chejan_data(911))
             # logger.debug("현재가, 체결가, 실시간종가")
-            purchase_price = self.get_chejan_data(10)
+            purchase_price = abs(int(self.get_chejan_data(10)))
 
             if code:
                 # 미체결 수량이 ""가 아닌 경우
